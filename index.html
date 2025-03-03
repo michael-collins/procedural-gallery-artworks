@@ -1,0 +1,1364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic 3D Art Gallery</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        #loading-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        #loading-bar {
+            width: 50%;
+            height: 20px;
+            background-color: #333;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+        #loading-progress {
+            width: 0%;
+            height: 100%;
+            background-color: #0088ff;
+            border-radius: 10px;
+            transition: width 0.3s ease;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            display: none;
+        }
+        #controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #directory-form {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 10;
+        }
+        #directory-input {
+            width: 300px;
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading-screen">
+        <h1>Loading Art Gallery</h1>
+        <div id="loading-bar">
+            <div id="loading-progress"></div>
+        </div>
+        <p id="loading-text">Preparing virtual space...</p>
+    </div>
+    
+    <div id="info"></div>
+    
+    <div id="controls">
+        WASD: Move | Mouse: Look | Shift: Run | E: Interact | ESC: Reset Mouse
+    </div>
+    
+    <div id="directory-form">
+        <input type="text" id="directory-input" placeholder="Enter GitHub repository URL (username/repo/path/to/gallery)" />
+        <button id="load-button">Load Gallery</button>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.module.js';
+        import { PointerLockControls } from 'https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/controls/PointerLockControls.js';
+        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/loaders/GLTFLoader.js';
+        import { RGBELoader } from 'https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/loaders/RGBELoader.js';
+
+        // Global variables
+        let camera, scene, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        let prevTime = performance.now();
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+        let raycaster = new THREE.Raycaster();
+        let loadingManager = new THREE.LoadingManager();
+        let galleryObjects = [];
+        let hoverObject = null;
+        let artworks = [];
+        let currentDirectoryUrl = '';
+        
+        // Wall and room parameters
+        const wallHeight = 4;
+        const roomSize = 8;
+        const corridorWidth = 3;
+        const artworkSpacing = 1.5;
+        
+        // Define modular gallery pieces
+        const modulePieces = {
+            room: { width: roomSize, depth: roomSize },
+            corridor: { width: corridorWidth, length: roomSize },
+            wall: { thickness: 0.2 }
+        };
+        
+        // Materials
+        let materials = {
+            floor: new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.1, metalness: 0.2 }),
+            wall: new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.9, metalness: 0.0 }),
+            ceiling: new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.8, metalness: 0.0 }),
+            highlight: new THREE.MeshStandardMaterial({ color: 0x44aaff, emissive: 0x114477, roughness: 0.5, metalness: 0.5 })
+        };
+        
+        // Loading manager setup
+        loadingManager.onProgress = function(url, loaded, total) {
+            document.getElementById('loading-progress').style.width = `${(loaded / total) * 100}%`;
+            document.getElementById('loading-text').textContent = `Loading: ${url.split('/').pop()}`;
+        };
+        
+        loadingManager.onLoad = function() {
+            document.getElementById('loading-screen').style.display = 'none';
+            controls.lock();
+        };
+        
+        // Initialize everything
+        init();
+        animate();
+        
+        function init() {
+            // Create scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x888888);
+            scene.fog = new THREE.FogExp2(0x888888, 0.02);
+            
+            // Create camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = 1.7; // Eye height
+            
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+            document.body.appendChild(renderer.domElement);
+            
+            // Setup pointer lock controls
+            controls = new PointerLockControls(camera, document.body);
+            
+            controls.addEventListener('lock', function() {
+                document.getElementById('controls').style.display = 'block';
+                document.getElementById('directory-form').style.display = 'none';
+            });
+            
+            controls.addEventListener('unlock', function() {
+                document.getElementById('controls').style.display = 'none';
+                document.getElementById('directory-form').style.display = 'block';
+            });
+            
+            // Add event listeners
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('click', onClick);
+            window.addEventListener('resize', onWindowResize);
+            
+            // Setup button events
+            document.getElementById('load-button').addEventListener('click', loadGalleryFromDirectory);
+            
+            // Load gallery environment
+            loadEnvironment();
+            
+            // Create default gallery with example art placement
+            createDefaultGallery();
+        }
+        
+        function loadEnvironment() {
+            // Add ambient light
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            
+            // Add directional light (like sun)
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(5, 10, 7.5);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 50;
+            directionalLight.shadow.camera.left = -20;
+            directionalLight.shadow.camera.right = 20;
+            directionalLight.shadow.camera.top = 20;
+            directionalLight.shadow.camera.bottom = -20;
+            scene.add(directionalLight);
+            
+            // Load environment HDR for reflections
+            const rgbeLoader = new RGBELoader(loadingManager);
+            rgbeLoader.setDataType(THREE.UnsignedByteType);
+            rgbeLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/equirectangular/royal_esplanade_1k.hdr', function(texture) {
+                const envMap = texture;
+                scene.environment = envMap;
+                
+                // Update materials with environment map
+                Object.values(materials).forEach(material => {
+                    material.envMap = envMap;
+                    material.needsUpdate = true;
+                });
+            });
+        }
+        
+        function createDefaultGallery() {
+            // Clear existing gallery if any
+            galleryObjects.forEach(obj => scene.remove(obj));
+            galleryObjects = [];
+            artworks = [];
+            
+            // Create floor
+            const floorGeometry = new THREE.PlaneGeometry(100, 100);
+            const floor = new THREE.Mesh(floorGeometry, materials.floor);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = 0;
+            floor.receiveShadow = true;
+            scene.add(floor);
+            galleryObjects.push(floor);
+            
+            // Create example gallery layout
+            createGalleryRoom(0, 0, 0);
+            createGalleryRoom(roomSize + corridorWidth, 0, 0);
+            createGalleryRoom(-roomSize - corridorWidth, 0, 0);
+            createGalleryRoom(0, 0, roomSize + corridorWidth);
+            createGalleryRoom(0, 0, -roomSize - corridorWidth);
+            
+            // Create corridors connecting rooms
+            createCorridor(0, 0, roomSize/2, 0, 0, corridorWidth/2, 'z');
+            createCorridor(0, 0, -roomSize/2, 0, 0, -corridorWidth/2, 'z');
+            createCorridor(roomSize/2, 0, 0, corridorWidth/2, 0, 0, 'x');
+            createCorridor(-roomSize/2, 0, 0, -corridorWidth/2, 0, 0, 'x');
+            
+            // Place sample artworks in central room
+            placeSampleArtworks();
+            
+            // Position camera in central room
+            camera.position.set(0, 1.7, 0);
+            controls.getObject().position.set(0, 1.7, 0);
+        }
+        
+        function createGalleryRoom(x, y, z) {
+            const room = new THREE.Group();
+            room.position.set(x, y, z);
+            
+            // Create floor
+            const floorGeometry = new THREE.PlaneGeometry(roomSize, roomSize);
+            const floor = new THREE.Mesh(floorGeometry, materials.floor);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = 0;
+            floor.receiveShadow = true;
+            room.add(floor);
+            
+            // Create ceiling
+            const ceilingGeometry = new THREE.PlaneGeometry(roomSize, roomSize);
+            const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
+            ceiling.rotation.x = Math.PI / 2;
+            ceiling.position.y = wallHeight;
+            ceiling.receiveShadow = true;
+            room.add(ceiling);
+            
+            // Create walls
+            // North wall
+            createWall(0, wallHeight/2, -roomSize/2, roomSize, wallHeight, modulePieces.wall.thickness, room);
+            // South wall
+            createWall(0, wallHeight/2, roomSize/2, roomSize, wallHeight, modulePieces.wall.thickness, room);
+            // East wall
+            createWall(roomSize/2, wallHeight/2, 0, modulePieces.wall.thickness, wallHeight, roomSize, room);
+            // West wall
+            createWall(-roomSize/2, wallHeight/2, 0, modulePieces.wall.thickness, wallHeight, roomSize, room);
+            
+            // Add spotlights for artworks
+            const spotLight1 = new THREE.SpotLight(0xffffff, 1, 0, Math.PI/6, 0.5, 1);
+            spotLight1.position.set(0, wallHeight - 0.5, 0);
+            spotLight1.target.position.set(0, 0, -roomSize/2 + 0.5);
+            spotLight1.castShadow = true;
+            room.add(spotLight1);
+            room.add(spotLight1.target);
+            
+            const spotLight2 = new THREE.SpotLight(0xffffff, 1, 0, Math.PI/6, 0.5, 1);
+            spotLight2.position.set(0, wallHeight - 0.5, 0);
+            spotLight2.target.position.set(0, 0, roomSize/2 - 0.5);
+            spotLight2.castShadow = true;
+            room.add(spotLight2);
+            room.add(spotLight2.target);
+            
+            const spotLight3 = new THREE.SpotLight(0xffffff, 1, 0, Math.PI/6, 0.5, 1);
+            spotLight3.position.set(0, wallHeight - 0.5, 0);
+            spotLight3.target.position.set(-roomSize/2 + 0.5, 0, 0);
+            spotLight3.castShadow = true;
+            room.add(spotLight3);
+            room.add(spotLight3.target);
+            
+            const spotLight4 = new THREE.SpotLight(0xffffff, 1, 0, Math.PI/6, 0.5, 1);
+            spotLight4.position.set(0, wallHeight - 0.5, 0);
+            spotLight4.target.position.set(roomSize/2 - 0.5, 0, 0);
+            spotLight4.castShadow = true;
+            room.add(spotLight4);
+            room.add(spotLight4.target);
+            
+            scene.add(room);
+            galleryObjects.push(room);
+            
+            return room;
+        }
+        
+        function createCorridor(startX, startY, startZ, endX, endY, endZ, direction) {
+            const corridor = new THREE.Group();
+            let length, width;
+            
+            if (direction === 'x') {
+                length = Math.abs(endX - startX) * 2;
+                width = corridorWidth;
+                corridor.position.set((startX + endX) / 2, startY, startZ);
+            } else {
+                length = Math.abs(endZ - startZ) * 2;
+                width = corridorWidth;
+                corridor.position.set(startX, startY, (startZ + endZ) / 2);
+            }
+            
+            // Create floor
+            const floorGeometry = new THREE.PlaneGeometry(
+                direction === 'x' ? length : width,
+                direction === 'x' ? width : length
+            );
+            const floor = new THREE.Mesh(floorGeometry, materials.floor);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.y = 0;
+            floor.receiveShadow = true;
+            corridor.add(floor);
+            
+            // Create ceiling
+            const ceilingGeometry = new THREE.PlaneGeometry(
+                direction === 'x' ? length : width,
+                direction === 'x' ? width : length
+            );
+            const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
+            ceiling.rotation.x = Math.PI / 2;
+            ceiling.position.y = wallHeight;
+            ceiling.receiveShadow = true;
+            corridor.add(ceiling);
+            
+            // Create walls
+            if (direction === 'x') {
+                // North wall
+                createWall(0, wallHeight/2, -width/2, length, wallHeight, modulePieces.wall.thickness, corridor);
+                // South wall
+                createWall(0, wallHeight/2, width/2, length, wallHeight, modulePieces.wall.thickness, corridor);
+            } else {
+                // East wall
+                createWall(width/2, wallHeight/2, 0, modulePieces.wall.thickness, wallHeight, length, corridor);
+                // West wall
+                createWall(-width/2, wallHeight/2, 0, modulePieces.wall.thickness, wallHeight, length, corridor);
+            }
+            
+            // Add corridor lights
+            const numLights = Math.ceil(length / 4);
+            for (let i = 0; i < numLights; i++) {
+                const lightPosition = direction === 'x' 
+                    ? new THREE.Vector3((i / (numLights - 1) - 0.5) * length, wallHeight - 0.2, 0)
+                    : new THREE.Vector3(0, wallHeight - 0.2, (i / (numLights - 1) - 0.5) * length);
+                
+                const pointLight = new THREE.PointLight(0xffffff, 0.5, 5, 2);
+                pointLight.position.copy(lightPosition);
+                corridor.add(pointLight);
+            }
+            
+            scene.add(corridor);
+            galleryObjects.push(corridor);
+            
+            return corridor;
+        }
+        
+        function createWall(x, y, z, width, height, depth, parent) {
+            // Skip walls with doors for corridors
+            if ((Math.abs(x) === roomSize/2 && Math.abs(z) < corridorWidth/2) || 
+                (Math.abs(z) === roomSize/2 && Math.abs(x) < corridorWidth/2)) {
+                return null;
+            }
+            
+            const wallGeometry = new THREE.BoxGeometry(width, height, depth);
+            const wall = new THREE.Mesh(wallGeometry, materials.wall);
+            wall.position.set(x, y, z);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            
+            parent.add(wall);
+            return wall;
+        }
+        
+        function placeSampleArtworks() {
+            // Sample artworks to display
+            const sampleArtworks = [
+                { type: 'image', title: 'Sample Artwork 1', url: 'https://picsum.photos/id/1/800/600' },
+                { type: 'image', title: 'Sample Artwork 2', url: 'https://picsum.photos/id/15/800/600' },
+                { type: 'image', title: 'Sample Artwork 3', url: 'https://picsum.photos/id/22/800/600' },
+                { type: 'image', title: 'Sample Artwork 4', url: 'https://picsum.photos/id/37/800/600' },
+                { type: 'image', title: 'Sample Artwork 5', url: 'https://picsum.photos/id/42/800/600' },
+                { type: 'image', title: 'Sample Artwork 6', url: 'https://picsum.photos/id/58/800/600' },
+                { type: 'image', title: 'Sample Artwork 7', url: 'https://picsum.photos/id/65/800/600' },
+                { type: 'image', title: 'Sample Artwork 8', url: 'https://picsum.photos/id/79/800/600' },
+            ];
+            
+            // Place artworks in main room
+            placeArtworkOnWall(0, 0, -roomSize/2 + 0.1, 0, sampleArtworks[0], 2, 1.5);
+            placeArtworkOnWall(-2, 0, -roomSize/2 + 0.1, 0, sampleArtworks[1], 1.5, 1.5);
+            placeArtworkOnWall(2, 0, -roomSize/2 + 0.1, 0, sampleArtworks[2], 1.5, 1.5);
+            
+            placeArtworkOnWall(0, 0, roomSize/2 - 0.1, Math.PI, sampleArtworks[3], 2, 1.5);
+            placeArtworkOnWall(-2, 0, roomSize/2 - 0.1, Math.PI, sampleArtworks[4], 1.5, 1.5);
+            placeArtworkOnWall(2, 0, roomSize/2 - 0.1, Math.PI, sampleArtworks[5], 1.5, 1.5);
+            
+            placeArtworkOnWall(-roomSize/2 + 0.1, 0, 0, Math.PI/2, sampleArtworks[6], 2, 1.5);
+            placeArtworkOnWall(roomSize/2 - 0.1, 0, 0, -Math.PI/2, sampleArtworks[7], 2, 1.5);
+        }
+        
+        function placeArtworkOnWall(x, y, z, rotation, artworkData, width, height) {
+            const textureLoader = new THREE.TextureLoader(loadingManager);
+            const artworkGroup = new THREE.Group();
+            
+            // Position the artwork
+            artworkGroup.position.set(x, y + wallHeight/2, z);
+            artworkGroup.rotation.y = rotation;
+            
+            // Create frame and artwork
+            const frameWidth = width + 0.1;
+            const frameHeight = height + 0.1;
+            const frameDepth = 0.05;
+            
+            // Frame
+            const frameGeometry = new THREE.BoxGeometry(frameWidth, frameHeight, frameDepth);
+            const frameMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x8B4513, 
+                roughness: 0.5, 
+                metalness: 0.2
+            });
+            const frame = new THREE.Mesh(frameGeometry, frameMaterial);
+            frame.castShadow = true;
+            artworkGroup.add(frame);
+            
+            // Canvas/Artwork
+            const canvasGeometry = new THREE.PlaneGeometry(width, height);
+            const canvasMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            
+            if (artworkData.type === 'image' && artworkData.url) {
+                textureLoader.load(artworkData.url, function(texture) {
+                    canvasMaterial.map = texture;
+                    canvasMaterial.needsUpdate = true;
+                });
+            }
+            
+            const canvas = new THREE.Mesh(canvasGeometry, canvasMaterial);
+            canvas.position.z = frameDepth/2 + 0.001; // Slightly in front of frame
+            artworkGroup.add(canvas);
+            
+            // Info text
+            const labelGeometry = new THREE.PlaneGeometry(width, 0.2);
+            const labelCanvas = document.createElement('canvas');
+            const context = labelCanvas.getContext('2d');
+            labelCanvas.width = 512;
+            labelCanvas.height = 64;
+            context.fillStyle = '#FFFFFF';
+            context.fillRect(0, 0, labelCanvas.width, labelCanvas.height);
+            context.fillStyle = '#000000';
+            context.font = '24px Arial';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText(artworkData.title, labelCanvas.width/2, labelCanvas.height/2);
+            
+            const labelTexture = new THREE.CanvasTexture(labelCanvas);
+            const labelMaterial = new THREE.MeshBasicMaterial({ map: labelTexture });
+            const label = new THREE.Mesh(labelGeometry, labelMaterial);
+            label.position.y = -(height/2 + 0.2);
+            label.position.z = frameDepth/2 + 0.001;
+            artworkGroup.add(label);
+            
+            // Make artwork interactive
+            canvas.userData = {
+                type: 'artwork',
+                title: artworkData.title,
+                description: artworkData.description || 'No description available.',
+                url: artworkData.url,
+                interactive: true
+            };
+            
+            artworks.push({
+                mesh: canvas,
+                data: artworkData,
+                group: artworkGroup
+            });
+            
+            scene.add(artworkGroup);
+            galleryObjects.push(artworkGroup);
+            
+            return artworkGroup;
+        }
+        
+        async function loadGalleryFromDirectory() {
+            const directoryInput = document.getElementById('directory-input').value.trim();
+            if (!directoryInput) {
+                alert('Please enter a GitHub repository path');
+                return;
+            }
+            
+            document.getElementById('loading-screen').style.display = 'flex';
+            document.getElementById('loading-text').textContent = 'Loading gallery data...';
+            document.getElementById('loading-progress').style.width = '0%';
+            
+            try {
+                // Parse GitHub URL
+                let repoPath;
+                if (directoryInput.includes('github.com')) {
+                    const url = new URL(directoryInput);
+                    const pathParts = url.pathname.split('/');
+                    // Remove empty first element
+                    pathParts.shift();
+                    // Get username and repo
+                    if (pathParts.length < 2) {
+                        throw new Error('Invalid GitHub URL, format should be: username/repo/path/to/gallery');
+                    }
+                    repoPath = pathParts.join('/');
+                } else {
+                    repoPath = directoryInput;
+                }
+                
+                // Remove 'blob/main' or 'tree/main' if present
+                repoPath = repoPath.replace(/\/(blob|tree)\/(main|master)\//, '/');
+                
+                // Separate username/repo from the rest of the path
+                const pathParts = repoPath.split('/');
+                const username = pathParts[0];
+                const repo = pathParts[1];
+                
+                // Get remaining path
+                const path = pathParts.slice(2).join('/');
+                const apiUrl = `https://api.github.com/repos/${username}/${repo}/contents/${path}`;
+                currentDirectoryUrl = `https://raw.githubusercontent.com/${username}/${repo}/main/${path}`;
+                
+                // Fetch directory contents
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch directory: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Process the directory structure
+                if (Array.isArray(data)) {
+                    // Create gallery from fetched content
+                    createGalleryFromContent(data, username, repo, path);
+                } else {
+                    throw new Error('Invalid repository data');
+                }
+            } catch (error) {
+                alert(`Error loading gallery: ${error.message}`);
+                document.getElementById('loading-screen').style.display = 'none';
+            }
+        }
+        
+        function createGalleryFromContent(contents, username, repo, path) {
+            // Clear existing gallery
+            galleryObjects.forEach(obj => scene.remove(obj));
+            galleryObjects = [];
+            artworks = [];
+            
+            // Categorize the contents
+            const folders = contents.filter(item => item.type === 'dir');
+            const files = contents.filter(item => item.type === 'file');
+            
+            // Create main entrance room
+            createGalleryRoom(0, 0, 0);
+            
+            // Create rooms for each folder
+            const folderRooms = {};
+            const angleIncrement = (2 * Math.PI) / Math.max(folders.length, 1);
+            
+            folders.forEach((folder, index) => {
+                const angle = index * angleIncrement;
+                const distance = roomSize + corridorWidth;
+                const roomX = Math.sin(angle) * distance;
+                const roomZ = Math.cos(angle) * distance;
+                
+                // Create room
+                const room = createGalleryRoom(roomX, 0, roomZ);
+                folderRooms[folder.name] = { room, x: roomX, z: roomZ };
+                
+                // Create corridor to room
+                createCorridor(0, 0, 0, roomX / 2, 0, roomZ / 2, 
+                    Math.abs(Math.sin(angle)) > 0.7 ? 'x' : 'z');
+                
+                // Place folder name on room entrance
+                placeFolderName(roomX / 2, wallHeight / 2, roomZ / 2, angle + Math.PI, folder.name);
+                
+                // Load folder contents
+                loadFolderContents(folder, username, repo, folderRooms[folder.name]);
+            });
+            
+            // Place image files in main room
+            const imageFiles = files.filter(file => {
+                const ext = file.name.split('.').pop().toLowerCase();
+                return ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
+            });
+            
+            // Place images around main room
+            const numWalls = 4;
+            const imagesPerWall = Math.ceil(imageFiles.length / numWalls);
+            
+            imageFiles.forEach((file, index) => {
+                const wallIndex = Math.floor(index / imagesPerWall);
+                const positionInWall = index % imagesPerWall;
+                
+                let x = 0, z = 0, rotation = 0;
+                const wallLength = roomSize - 2;
+                const spacing = wallLength / (imagesPerWall + 1);
+                const position = spacing * (positionInWall + 1) - wallLength / 2;
+                
+                switch (wallIndex) {
+                    case 0: // North wall
+                        x = position;
+                        z = -roomSize/2 + 0.1;
+                        rotation = 0;
+                        break;
+                    case 1: // East wall
+                        x = roomSize/2 - 0.1;
+                        z = position;
+                        rotation = -Math.PI/2;
+                        break;
+                    case 2: // South wall
+                        x = -position;
+                        z = roomSize/2 - 0.1;
+                        rotation = Math.PI;
+                        break;
+                    case 3: // West wall
+                        x = -roomSize/2 + 0.1;
+                        z = -position;
+                        rotation = Math.PI/2;
+                        break;
+                }
+                
+                // Create artwork
+                const artworkUrl = `https://raw.githubusercontent.com/${username}/${repo}/main/${path}/${file.name}`;
+                const artworkData = {
+                    type: 'image',
+                    title: file.name,
+                    description: `File from ${username}/${repo}`,
+                    url: artworkUrl
+                };
+                
+                // Place artwork on wall
+                placeArtworkOnWall(x, 0, z, rotation, artworkData, 1.5, 1.2);
+            });
+            
+            // Place text files as info panels
+            const textFiles = files.filter(file => {
+                const ext = file.name.split('.').pop().toLowerCase();
+                return ['txt', 'md', 'json'].includes(ext);
+            });
+            
+            if (textFiles.length > 0) {
+                // Create info kiosk in the center of the main room
+                createInfoKiosk(0, 0, 0, textFiles, username, repo, path);
+            }
+            
+            // Position player in entrance
+            camera.position.set(0, 1.7, roomSize);
+            controls.getObject().position.set(0, 1.7, roomSize);
+            
+            document.getElementById('loading-screen').style.display = 'none';
+        }
+        
+        async function loadFolderContents(folder, username, repo, roomData) {
+            try {
+                const folderUrl = `https://api.github.com/repos/${username}/${repo}/contents/${folder.path}`;
+                const response = await fetch(folderUrl);
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch folder contents: ${response.statusText}`);
+                }
+                
+                const contents = await response.json();
+                
+                // Filter for image files
+                const imageFiles = contents.filter(file => {
+                    const ext = file.name.split('.').pop().toLowerCase();
+                    return ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
+                });
+                
+                // Place images around room
+                const numWalls = 4;
+                const imagesPerWall = Math.ceil(imageFiles.length / numWalls);
+                
+                imageFiles.forEach((file, index) => {
+                    const wallIndex = Math.floor(index / imagesPerWall);
+                    const positionInWall = index % imagesPerWall;
+                    
+                    let localX = 0, localZ = 0, rotation = 0;
+                    const wallLength = roomSize - 2;
+                    const spacing = wallLength / (imagesPerWall + 1);
+                    const position = spacing * (positionInWall + 1) - wallLength / 2;
+                    
+                    switch (wallIndex) {
+                        case 0: // North wall
+                            localX = position;
+                            localZ = -roomSize/2 + 0.1;
+                            rotation = 0;
+                            break;
+                        case 1: // East wall
+                            localX = roomSize/2 - 0.1;
+                            localZ = position;
+                            rotation = -Math.PI/2;
+                            break;
+                        case 2: // South wall
+                            localX = -position;
+                            localZ = roomSize/2 - 0.1;
+                            rotation = Math.PI;
+                            break;
+                        case 3: // West wall
+                            localX = -roomSize/2 + 0.1;
+                            localZ = -position;
+                            rotation = Math.PI/2;
+                            break;
+                    }
+                    
+                    // Create artwork
+                    const artworkUrl = `https://raw.githubusercontent.com/${username}/${repo}/main/${file.path}`;
+                    const artworkData = {
+                        type: 'image',
+                        title: file.name,
+                        description: `File from ${folder.name}`,
+                        url: artworkUrl
+                    };
+                    
+                    // Place artwork on wall, adjusting for room position
+                    placeArtworkOnWall(
+                        roomData.x + localX, 
+                        0, 
+                        roomData.z + localZ, 
+                        rotation, 
+                        artworkData, 
+                        1.5, 
+                        1.2
+                    );
+                });
+                
+            } catch (error) {
+                console.error(`Error loading folder ${folder.name}:`, error);
+            }
+        }
+        
+        function placeFolderName(x, y, z, rotation, folderName) {
+            const nameGroup = new THREE.Group();
+            nameGroup.position.set(x, y, z);
+            nameGroup.rotation.y = rotation;
+            
+            // Create background panel
+            const panelGeometry = new THREE.PlaneGeometry(2, 0.5);
+            const panelMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x333333, 
+                roughness: 0.8, 
+                metalness: 0.2
+            });
+            const panel = new THREE.Mesh(panelGeometry, panelMaterial);
+            nameGroup.add(panel);
+            
+            // Create text
+            const textCanvas = document.createElement('canvas');
+            const context = textCanvas.getContext('2d');
+            textCanvas.width = 512;
+            textCanvas.height = 128;
+            context.fillStyle = '#333333';
+            context.fillRect(0, 0, textCanvas.width, textCanvas.height);
+            context.fillStyle = '#FFFFFF';
+            context.font = 'bold 32px Arial';
+            context.textAlign = 'center';
+            context.textBaseline = 'middle';
+            context.fillText(folderName, textCanvas.width/2, textCanvas.height/2);
+            
+            const textTexture = new THREE.CanvasTexture(textCanvas);
+            const textMaterial = new THREE.MeshBasicMaterial({ 
+                map: textTexture,
+                transparent: true
+            });
+            const text = new THREE.Mesh(panelGeometry, textMaterial);
+            text.position.z = 0.01; // Slightly in front
+            nameGroup.add(text);
+            
+            scene.add(nameGroup);
+            galleryObjects.push(nameGroup);
+            
+            return nameGroup;
+        }
+        
+        function createInfoKiosk(x, y, z, textFiles, username, repo, path) {
+            const kioskGroup = new THREE.Group();
+            kioskGroup.position.set(x, y, z);
+            
+            // Create pedestal
+            const pedestalGeometry = new THREE.CylinderGeometry(0.8, 1, 1.2, 16);
+            const pedestalMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x444444, 
+                roughness: 0.7, 
+                metalness: 0.3
+            });
+            const pedestal = new THREE.Mesh(pedestalGeometry, pedestalMaterial);
+            pedestal.position.y = 0.6;
+            kioskGroup.add(pedestal);
+            
+            // Create info panel
+            const panelGeometry = new THREE.CylinderGeometry(0.8, 0.8, 1.5, 16, 1, true);
+            const panelMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x222222, 
+                roughness: 0.8, 
+                metalness: 0.2,
+                side: THREE.DoubleSide
+            });
+            const panel = new THREE.Mesh(panelGeometry, panelMaterial);
+            panel.position.y = 1.75;
+            kioskGroup.add(panel);
+            
+            // Create text
+            textFiles.forEach((file, index) => {
+                const angle = (index / textFiles.length) * Math.PI * 2;
+                
+                // Create text panel
+                const textPanelGeometry = new THREE.PlaneGeometry(1, 0.8);
+                const textCanvas = document.createElement('canvas');
+                const context = textCanvas.getContext('2d');
+                textCanvas.width = 512;
+                textCanvas.height = 384;
+                context.fillStyle = '#222222';
+                context.fillRect(0, 0, textCanvas.width, textCanvas.height);
+                context.fillStyle = '#FFFFFF';
+                context.font = 'bold 24px Arial';
+                context.textAlign = 'center';
+                context.textBaseline = 'top';
+                context.fillText(file.name, textCanvas.width/2, 20);
+                
+                // Load text file content
+                const fileUrl = `https://raw.githubusercontent.com/${username}/${repo}/main/${path}/${file.name}`;
+                fetch(fileUrl)
+                    .then(response => response.text())
+                    .then(content => {
+                        // Limit content to prevent overflow
+                        const truncatedContent = content.length > 300 
+                            ? content.substring(0, 300) + '...' 
+                            : content;
+                        
+                        context.font = '16px Arial';
+                        context.textAlign = 'left';
+                        context.fillText('Loading content...', 20, 60);
+                        
+                        // Word wrap and draw text
+                        const words = truncatedContent.split(' ');
+                        let line = '';
+                        let y = 60;
+                        const lineHeight = 20;
+                        const maxWidth = textCanvas.width - 40;
+                        
+                        words.forEach(word => {
+                            const testLine = line + word + ' ';
+                            const metrics = context.measureText(testLine);
+                            
+                            if (metrics.width > maxWidth) {
+                                context.fillText(line, 20, y);
+                                line = word + ' ';
+                                y += lineHeight;
+                                
+                                // Check if we've reached the bottom of the canvas
+                                if (y > textCanvas.height - lineHeight) {
+                                    line = '...';
+                                    return;
+                                }
+                            } else {
+                                line = testLine;
+                            }
+                        });
+                        
+                        context.fillText(line, 20, y);
+                        
+                        // Update texture
+                        textTexture.needsUpdate = true;
+                    })
+                    .catch(error => {
+                        console.error(`Error loading file ${file.name}:`, error);
+                        context.fillText('Error loading content', 20, 60);
+                        textTexture.needsUpdate = true;
+                    });
+                
+                const textTexture = new THREE.CanvasTexture(textCanvas);
+                const textMaterial = new THREE.MeshBasicMaterial({ 
+                    map: textTexture,
+                    side: THREE.DoubleSide
+                });
+                const textPanel = new THREE.Mesh(textPanelGeometry, textMaterial);
+                
+                // Position and rotate the panel to align with cylinder
+                textPanel.position.set(
+                    Math.sin(angle) * 0.82, 
+                    1.75, 
+                    Math.cos(angle) * 0.82
+                );
+                textPanel.rotation.y = angle + Math.PI;
+                
+                // Make interactive
+                textPanel.userData = {
+                    type: 'info',
+                    title: file.name,
+                    url: fileUrl,
+                    interactive: true
+                };
+                
+                kioskGroup.add(textPanel);
+            });
+            
+            scene.add(kioskGroup);
+            galleryObjects.push(kioskGroup);
+            
+            return kioskGroup;
+        }
+        
+        // Event handlers
+        function onKeyDown(event) {
+            switch (event.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    moveForward = true;
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    moveLeft = true;
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    moveBackward = true;
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    moveRight = true;
+                    break;
+                case 'Space':
+                    if (canJump === true) velocity.y += 200;
+                    canJump = false;
+                    break;
+                case 'ShiftLeft':
+                case 'ShiftRight':
+                    // Boost speed when shift is held
+                    velocity.z = velocity.z * 2;
+                    break;
+                case 'KeyE':
+                    // Interact with artwork
+                    interactWithObject();
+                    break;
+                case 'Escape':
+                    controls.unlock();
+                    break;
+            }
+        }
+        
+        function onKeyUp(event) {
+            switch (event.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    moveForward = false;
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    moveLeft = false;
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    moveBackward = false;
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    moveRight = false;
+                    break;
+                case 'ShiftLeft':
+                case 'ShiftRight':
+                    // Reset speed
+                    velocity.z = velocity.z / 2;
+                    break;
+            }
+        }
+        
+        function onMouseMove(event) {
+            // Check for intersections
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            let foundInteractive = false;
+            
+            for (let i = 0; i < intersects.length; i++) {
+                const object = intersects[i].object;
+                
+                if (object.userData && object.userData.interactive) {
+                    document.body.style.cursor = 'pointer';
+                    
+                    // Highlight object
+                    if (hoverObject && hoverObject !== object) {
+                        resetHighlight(hoverObject);
+                    }
+                    
+                    hoverObject = object;
+                    highlightObject(object);
+                    
+                    // Show info
+                    showInfo(object.userData.title);
+                    
+                    foundInteractive = true;
+                    break;
+                }
+            }
+            
+            if (!foundInteractive) {
+                document.body.style.cursor = 'default';
+                document.getElementById('info').style.display = 'none';
+                
+                if (hoverObject) {
+                    resetHighlight(hoverObject);
+                    hoverObject = null;
+                }
+            }
+        }
+        
+        function onClick(event) {
+            if (hoverObject) {
+                interactWithObject();
+            }
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        function interactWithObject() {
+            if (!hoverObject) return;
+            
+            if (hoverObject.userData.type === 'artwork') {
+                // Create expanded view of artwork
+                showExpandedArtwork(hoverObject);
+            } else if (hoverObject.userData.type === 'info') {
+                // Show text content in expanded view
+                showTextContent(hoverObject);
+            }
+        }
+        
+        function showInfo(title) {
+            const infoElement = document.getElementById('info');
+            infoElement.textContent = title;
+            infoElement.style.display = 'block';
+        }
+        
+        function highlightObject(object) {
+            // Store original material to restore later
+            if (!object.userData.originalMaterial) {
+                object.userData.originalMaterial = object.material;
+                
+                // Create a highlight material
+                const highlightMaterial = object.material.clone();
+                highlightMaterial.emissive = new THREE.Color(0x444444);
+                object.material = highlightMaterial;
+            }
+        }
+        
+        function resetHighlight(object) {
+            if (object.userData.originalMaterial) {
+                object.material = object.userData.originalMaterial;
+                object.userData.originalMaterial = null;
+            }
+        }
+        
+        function showExpandedArtwork(object) {
+            // Create a modal-like view in the 3D space
+            const modalGroup = new THREE.Group();
+            const modalSize = { width: 4, height: 3 };
+            
+            // Position in front of camera
+            const direction = new THREE.Vector3();
+            camera.getWorldDirection(direction);
+            const position = camera.position.clone().add(direction.multiplyScalar(3));
+            modalGroup.position.copy(position);
+            
+            // Make modal face the camera
+            modalGroup.lookAt(camera.position);
+            
+            // Create background
+            const bgGeometry = new THREE.PlaneGeometry(modalSize.width + 0.4, modalSize.height + 0.8);
+            const bgMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.8 });
+            const background = new THREE.Mesh(bgGeometry, bgMaterial);
+            modalGroup.add(background);
+            
+            // Create artwork display
+            const displayGeometry = new THREE.PlaneGeometry(modalSize.width, modalSize.height);
+            const displayMaterial = object.userData.originalMaterial 
+                ? object.userData.originalMaterial.clone() 
+                : object.material.clone();
+            const display = new THREE.Mesh(displayGeometry, displayMaterial);
+            display.position.z = 0.01;
+            modalGroup.add(display);
+            
+            // Create close button
+            const closeCanvas = document.createElement('canvas');
+            const ctx = closeCanvas.getContext('2d');
+            closeCanvas.width = 64;
+            closeCanvas.height = 64;
+            ctx.fillStyle = '#ff0000';
+            ctx.beginPath();
+            ctx.arc(32, 32, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 40px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('×', 32, 32);
+            
+            const closeTexture = new THREE.CanvasTexture(closeCanvas);
+            const closeMaterial = new THREE.MeshBasicMaterial({ map: closeTexture, transparent: true });
+            const closeGeometry = new THREE.PlaneGeometry(0.3, 0.3);
+            const closeButton = new THREE.Mesh(closeGeometry, closeMaterial);
+            closeButton.position.set(modalSize.width/2, modalSize.height/2, 0.02);
+            closeButton.userData = { type: 'close', interactive: true };
+            modalGroup.add(closeButton);
+            
+            // Create info section
+            const infoCanvas = document.createElement('canvas');
+            const infoCtx = infoCanvas.getContext('2d');
+            infoCanvas.width = 1024;
+            infoCanvas.height = 256;
+            infoCtx.fillStyle = '#333333';
+            infoCtx.fillRect(0, 0, infoCanvas.width, infoCanvas.height);
+            infoCtx.fillStyle = '#ffffff';
+            infoCtx.font = 'bold 24px Arial';
+            infoCtx.textAlign = 'center';
+            infoCtx.textBaseline = 'top';
+            infoCtx.fillText(object.userData.title, infoCanvas.width/2, 20);
+            infoCtx.font = '18px Arial';
+            infoCtx.fillText(object.userData.description || '', infoCanvas.width/2, 60);
+            
+            const infoTexture = new THREE.CanvasTexture(infoCanvas);
+            const infoMaterial = new THREE.MeshBasicMaterial({ map: infoTexture, transparent: true });
+            const infoGeometry = new THREE.PlaneGeometry(modalSize.width, 0.6);
+            const infoPanel = new THREE.Mesh(infoGeometry, infoMaterial);
+            infoPanel.position.set(0, -modalSize.height/2 - 0.3, 0.01);
+            modalGroup.add(infoPanel);
+            
+            scene.add(modalGroup);
+            galleryObjects.push(modalGroup);
+            
+            // Store reference to modal to remove it later
+            object.userData.modal = modalGroup;
+            
+            // Add event listener for close button
+            document.addEventListener('click', function closeModal() {
+                scene.remove(modalGroup);
+                galleryObjects = galleryObjects.filter(obj => obj !== modalGroup);
+                document.removeEventListener('click', closeModal);
+                
+                // Remove modal reference
+                if (object && object.userData) {
+                    object.userData.modal = null;
+                }
+            });
+        }
+        
+        function showTextContent(object) {
+            // Create a modal-like view for text content
+            const modalGroup = new THREE.Group();
+            const modalSize = { width: 4, height: 4 };
+            
+            // Position in front of camera
+            const direction = new THREE.Vector3();
+            camera.getWorldDirection(direction);
+            const position = camera.position.clone().add(direction.multiplyScalar(3));
+            modalGroup.position.copy(position);
+            
+            // Make modal face the camera
+            modalGroup.lookAt(camera.position);
+            
+            // Create background
+            const bgGeometry = new THREE.PlaneGeometry(modalSize.width + 0.4, modalSize.height + 0.4);
+            const bgMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.8 });
+            const background = new THREE.Mesh(bgGeometry, bgMaterial);
+            modalGroup.add(background);
+            
+            // Create text panel
+            const textPanelGeometry = new THREE.PlaneGeometry(modalSize.width, modalSize.height);
+            const textCanvas = document.createElement('canvas');
+            const context = textCanvas.getContext('2d');
+            textCanvas.width = 1024;
+            textCanvas.height = 1024;
+            context.fillStyle = '#222222';
+            context.fillRect(0, 0, textCanvas.width, textCanvas.height);
+            context.fillStyle = '#FFFFFF';
+            context.font = 'bold 32px Arial';
+            context.textAlign = 'center';
+            context.textBaseline = 'top';
+            context.fillText(object.userData.title, textCanvas.width/2, 20);
+            
+            // Load text content
+            context.font = '18px Arial';
+            context.textAlign = 'left';
+            context.fillText('Loading content...', 30, 80);
+            
+            const textTexture = new THREE.CanvasTexture(textCanvas);
+            const textMaterial = new THREE.MeshBasicMaterial({ map: textTexture });
+            const textPanel = new THREE.Mesh(textPanelGeometry, textMaterial);
+            textPanel.position.z = 0.01;
+            modalGroup.add(textPanel);
+            
+            // Create close button
+            const closeCanvas = document.createElement('canvas');
+            const ctx = closeCanvas.getContext('2d');
+            closeCanvas.width = 64;
+            closeCanvas.height = 64;
+            ctx.fillStyle = '#ff0000';
+            ctx.beginPath();
+            ctx.arc(32, 32, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 40px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('×', 32, 32);
+            
+            const closeTexture = new THREE.CanvasTexture(closeCanvas);
+            const closeMaterial = new THREE.MeshBasicMaterial({ map: closeTexture, transparent: true });
+            const closeGeometry = new THREE.PlaneGeometry(0.3, 0.3);
+            const closeButton = new THREE.Mesh(closeGeometry, closeMaterial);
+            closeButton.position.set(modalSize.width/2, modalSize.height/2, 0.02);
+            closeButton.userData = { type: 'close', interactive: true };
+            modalGroup.add(closeButton);
+            
+            scene.add(modalGroup);
+            galleryObjects.push(modalGroup);
+            
+            // Store reference to modal to remove it later
+            object.userData.modal = modalGroup;
+            
+            // Load file content
+            fetch(object.userData.url)
+                .then(response => response.text())
+                .then(content => {
+                    // Clear previous content
+                    context.fillStyle = '#222222';
+                    context.fillRect(0, 60, textCanvas.width, textCanvas.height - 60);
+                    context.fillStyle = '#FFFFFF';
+                    
+                    // Word wrap and draw text
+                    const words = content.split(' ');
+                    let line = '';
+                    let y = 80;
+                    const lineHeight = 24;
+                    const maxWidth = textCanvas.width - 60;
+                    
+                    words.forEach(word => {
+                        const testLine = line + word + ' ';
+                        const metrics = context.measureText(testLine);
+                        
+                        if (metrics.width > maxWidth) {
+                            context.fillText(line, 30, y);
+                            line = word + ' ';
+                            y += lineHeight;
+                            
+                            // Check if we've reached the bottom of the canvas
+                            if (y > textCanvas.height - lineHeight) {
+                                line = '...';
+                                return;
+                            }
+                        } else {
+                            line = testLine;
+                        }
+                    });
+                    
+                    context.fillText(line, 30, y);
+                    
+                    // Update texture
+                    textTexture.needsUpdate = true;
+                })
+                .catch(error => {
+                    console.error(`Error loading file content:`, error);
+                    context.fillText('Error loading content', 30, 80);
+                    textTexture.needsUpdate = true;
+                });
+            
+            // Add event listener for close button
+            document.addEventListener('click', function closeModal() {
+                scene.remove(modalGroup);
+                galleryObjects = galleryObjects.filter(obj => obj !== modalGroup);
+                document.removeEventListener('click', closeModal);
+                
+                // Remove modal reference
+                if (object && object.userData) {
+                    object.userData.modal = null;
+                }
+            });
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (controls.isLocked === true) {
+                // Calculate delta time
+                const time = performance.now();
+                const delta = (time - prevTime) / 1000;
+                
+                // Apply friction
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                
+                // Adjust velocity based on movement
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+                
+                // Adjust movement speed
+                const speed = 5.0;
+                if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
+                
+                // Move the camera
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                
+                // Update previous time
+                prevTime = time;
+            }
+            
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
